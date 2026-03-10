@@ -1,6 +1,7 @@
 """基金数据模型"""
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, Float, DateTime, Enum, Text
+from sqlalchemy.orm import relationship
 from app.core.database import Base
 import enum
 
@@ -64,6 +65,9 @@ class Fund(Base):
     # 创建和更新时间
     created_at = Column(DateTime, default=datetime.now, comment="创建时间")
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment="更新时间")
+    
+    # 关联组合 - 暂时注释，等Portfolio模型完善后再启用
+    # portfolios = relationship("Portfolio", secondary="portfolio_funds", back_populates="funds")
     
     def __repr__(self):
         return f"<Fund {self.fund_code} - {self.fund_name}>"
