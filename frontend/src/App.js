@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Layout, Menu, Table, Card, Row, Col, Statistic, Select, Input, Button, Space, Tag, Spin, message, Breadcrumb, Descriptions, Divider, Modal, Form, DatePicker, InputNumber } from 'antd';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
-import { FundOutlined, SearchOutlined, BarChartOutlined, SyncOutlined, FireOutlined, HomeOutlined, ArrowLeftOutlined, PlusOutlined, DeleteOutlined, PlayCircleOutlined, EditOutlined, PortfolioOutlined } from '@ant-design/icons';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, BarChart, Bar, Legend, ComposedChart, ReferenceLine } from 'recharts';
+import { calculateAllRiskMetrics, calculateMonthlyReturns, calculateMaxDrawdown, calculateVolatility, calculateSharpeRatio, calculateCalmarRatio, calculateSortinoRatio } from './utils/riskCalculator';
+import { FundOutlined, SearchOutlined, BarChartOutlined, SyncOutlined, FireOutlined, HomeOutlined, ArrowLeftOutlined, PlusOutlined, DeleteOutlined, PlayCircleOutlined, EditOutlined, WalletOutlined } from '@ant-design/icons';
 import axios from 'axios';
 import dayjs from 'dayjs';
 
@@ -331,26 +332,105 @@ function BacktestManager({ selectedStrategy, onBack }) {
       <Card title="回测记录" extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => setModalVisible(true)}>新建回测</Button>}>
         <Spin spinning={loading}><Table columns={columns} dataSource={backtests} rowKey="id" /></Spin>
       </Card>
-      <Modal title={`回测结果 - ${selectedBacktest?.name}`} open={!!selectedBacktest} onCancel={() => setSelectedBacktest(null)} footer={null} width={900}>
-        {selectedBacktest?.result && (
+      <Modal title={`回测结果 - ${selectedBacktest?.name}`} open={!!selectedBacktest} onCancel={() => setSelectedBacktest(null)} footer={null} width={1000}>
+        {selectedBacktest?.result && (() => {
+          const result = selectedBacktest.result;
+          const metrics = calculateAllRiskMetrics(result);
+          const monthlyData = metrics?.monthlyReturns || [];
+          
+          return (
           <div>
-            <Row gutter={16}>
-              <Col span={6}><Statistic title="初始资金" value={selectedBacktest.result.initial_capital} prefix="¥" /></Col>
-              <Col span={6}><Statistic title="最终价值" value={selectedBacktest.result.final_value} prefix="¥" /></Col>
-              <Col span={6}><Statistic title="总收益" value={selectedBacktest.result.total_return} prefix="¥" valueStyle={{ color: selectedBacktest.result.total_return >= 0 ? '#ff4d4f' : '#52c41a' }} /></Col>
-              <Col span={6}><Statistic title="收益率" value={selectedBacktest.result.total_return_pct} suffix="%" valueStyle={{ color: selectedBacktest.result.total_return_pct >= 0 ? '#ff4d4f' : '#52c41a' }} /></Col>
+            {/* 基础收益指标 */}
+            <Row gutter={16} style={{ marginBottom: 16 }}>
+              <Col span={6}><Card size="small"><Statistic title="初始资金" value={result.initial_capital} prefix="¥" /></Card></Col>
+              <Col span={6}><Card size="small"><Statistic title="最终价值" value={result.final_value} prefix="¥" /></Card></Col>
+              <Col span={6}><Card size="small"><Statistic title="总收益" value={result.total_return} prefix="¥" valueStyle={{ color: result.total_return >= 0 ? '#ff4d4f' : '#52c41a' }} /></Card></Col>
+              <Col span={6}><Card size="small"><Statistic title="收益率" value={result.total_return_pct} suffix="%" valueStyle={{ color: result.total_return_pct >= 0 ? '#ff4d4f' : '#52c41a' }} /></Card></Col>
             </Row>
+            
+            {/* V2.0 风险指标仪表盘 */}
+            {metrics && (
+              <>
+                <Divider orientation="left">风险指标仪表盘</Divider>
+                <Row gutter={16} style={{ marginBottom: 16 }}>
+                  <Col span={4}><Card size="small">
+                    <Statistic title="年化收益" value={metrics.annualizedReturn?.toFixed(2)} suffix="%" valueStyle={{ color: metrics.annualizedReturn >= 0 ? '#ff4d4f' : '#52c41a' }} />
+                  </Card></Col>
+                  <Col span={4}><Card size="small">
+                    <Statistic title="最大回撤" value={metrics.maxDrawdown?.toFixed(2)} suffix="%" valueStyle={{ color: metrics.maxDrawdown > 20 ? '#ff4d4f' : '#faad14' }} />
+                  </Card></Col>
+                  <Col span={4}><Card size="small">
+                    <Statistic title="年化波动率" value={metrics.volatility?.toFixed(2)} suffix="%" />
+                  </Card></Col>
+                  <Col span={4}><Card size="small">
+                    <Statistic title="夏普比率" value={metrics.sharpeRatio?.toFixed(2)} />
+                  </Card></Col>
+                  <Col span={4}><Card size="small">
+                    <Statistic title="卡玛比率" value={metrics.calmarRatio?.toFixed(2) || 'N/A'} />
+                  </Card></Col>
+                  <Col span={4}><Card size="small">
+                    <Statistic title="风险等级" value={metrics.riskLevel} valueStyle={{ 
+                      color: metrics.riskLevel === 'A' ? '#52c41a' : metrics.riskLevel === 'B' ? '#1890ff' : metrics.riskLevel === 'C' ? '#faad14' : '#ff4d4f',
+                      fontSize: 24, fontWeight: 'bold'
+                    }} />
+                  </Card></Col>
+                </Row>
+              </>
+            )}
+            
             <Divider>收益曲线</Divider>
             <ResponsiveContainer width="100%" height={300}>
-              <AreaChart data={selectedBacktest.result.equity_curve}>
-                <defs><linearGradient id="cv" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#1890ff" stopOpacity={0.3}/><stop offset="95%" stopColor="#1890ff" stopOpacity={0}/></linearGradient></defs>
-                <CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="date" tick={{ fontSize: 10 }} /><YAxis tick={{ fontSize: 10 }} /><Tooltip />
+              <ComposedChart data={result.equity_curve}>
+                <defs>
+                  <linearGradient id="cv" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#1890ff" stopOpacity={0.3}/>
+                    <stop offset="95%" stopColor="#1890ff" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="date" tick={{ fontSize: 10 }} />
+                <YAxis tick={{ fontSize: 10 }} />
+                <Tooltip />
+                <Legend />
                 <Area type="monotone" dataKey="value" stroke="#1890ff" fillOpacity={1} fill="url(#cv)" name="资产值" />
-                <Line type="monotone" dataKey="invested" stroke="#ff4d4f" strokeDasharray="5 5" name="投入" dot={false} />
-              </AreaChart>
+                <Line type="monotone" dataKey="invested" stroke="#ff4d4f" strokeDasharray="5 5" name="累计投入" dot={false} />
+              </ComposedChart>
             </ResponsiveContainer>
+            
+            {/* V2.0 月度收益柱状图 */}
+            {monthlyData.length > 0 && (
+              <>
+                <Divider>月度收益</Divider>
+                <ResponsiveContainer width="100%" height={250}>
+                  <BarChart data={monthlyData.slice(-12)}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="month" tick={{ fontSize: 10 }} />
+                    <YAxis tick={{ fontSize: 10 }} />
+                    <Tooltip formatter={(value) => value?.toFixed(2) + '%'} />
+                    <Bar dataKey="return" name="月收益%">
+                      {monthlyData.slice(-12).map((entry, index) => (
+                        <Bar key={index} dataKey="return" fill={entry.isPositive ? '#52c41a' : '#ff4d4f'} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </>
+            )}
+            
+            {/* 交易统计 */}
+            {result.trades && result.trades.length > 0 && (
+              <>
+                <Divider>交易统计</Divider>
+                <Row gutter={16}>
+                  <Col span={8}><Statistic title="总交易次数" value={result.trades.length} /></Col>
+                  <Col span={8}><Statistic title="买入次数" value={result.trades.filter(t => t.action === 'buy').length} /></Col>
+                  <Col span={8}><Statistic title="卖出次数" value={result.trades.filter(t => t.action === 'sell').length} /></Col>
+                </Row>
+              </>
+            )}
           </div>
-        )}
+          );
+        })()}
       </Modal>
       <Modal title="创建回测" open={modalVisible} onCancel={() => setModalVisible(false)} footer={null} width={500}>
         <Form form={form} layout="vertical" onFinish={handleCreate}>
@@ -373,7 +453,7 @@ function BacktestManager({ selectedStrategy, onBack }) {
 // ============ 组合管理组件 ============
 function PortfolioManager({ onViewDetail }) {
   const [portfolios, setPortfolios] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [modalVisible, setModalVisible] = useState(false);
   const [editPortfolio, setEditPortfolio] = useState(null);
   const [detailPortfolio, setDetailPortfolio] = useState(null);
@@ -519,7 +599,7 @@ function PortfolioManager({ onViewDetail }) {
   return (
     <div>
       <Card title="组合管理" extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditPortfolio(null); form.resetFields(); setModalVisible(true); }}>新建组合</Button>}>
-        <Spin spinning={loading}><Table columns={columns} dataSource={portfolios} rowKey="id" /></Spin>
+        <Spin spinning={loading}><Table columns={columns} dataSource={portfolios || []} rowKey="id" /></Spin>
       </Card>
       
       {/* 创建/编辑弹窗 */}
@@ -648,7 +728,7 @@ function App() {
             else if (e.key === 'portfolio') setCurrentView('portfolio');
           }} style={{ height: '100%', borderRight: 0 }} items={[
             { key: 'funds', icon: <FundOutlined />, label: '基金列表' },
-            { key: 'portfolio', icon: <PortfolioOutlined />, label: '组合管理' },
+            { key: 'portfolio', icon: <WalletOutlined />, label: '组合管理' },
             { key: 'strategy', icon: <BarChartOutlined />, label: '策略管理' },
             { key: 'backtest', icon: <SyncOutlined />, label: '回测记录' },
           ]} />

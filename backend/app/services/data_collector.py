@@ -17,7 +17,7 @@ class DataCollector:
     
     def __init__(self, db: Session):
         self.db = db
-        self.request_delay = 1.0  # 请求间隔(秒)，避免被封
+        self.request_delay = 0.5  # 请求间隔(秒)，避免被封
     
     # ============ 基金基本信息采集 ============
     
@@ -42,8 +42,8 @@ class DataCollector:
         try:
             logger.info("开始采集基金列表...")
             
-            # 获取基金列表
-            fund_df = ak.fund_info_a_code_name()
+            # 获取基金列表 - 使用 fund_name_em 接口
+            fund_df = ak.fund_name_em()
             
             if fund_df is None or fund_df.empty:
                 logger.warning("未获取到基金数据")
@@ -54,8 +54,9 @@ class DataCollector:
             
             for idx, row in fund_df.iterrows():
                 try:
-                    fund_code = str(row.get('code', '')).zfill(6)
-                    fund_name = row.get('name', '')
+                    fund_code = str(row.get('基金代码', '')).zfill(6)
+                    fund_name = row.get('基金简称', '')
+                    fund_type_str = row.get('基金类型', '')
                     
                     if not fund_code or not fund_name:
                         result["skipped"] += 1
@@ -67,8 +68,8 @@ class DataCollector:
                         result["skipped"] += 1
                         continue
                     
-                    # 获取基金详细信息
-                    fund_type = self._get_fund_type(fund_code)
+                    # 解析基金类型
+                    fund_type = self._parse_fund_type(fund_type_str)
                     
                     # 创建基金记录
                     fund = Fund(
@@ -80,12 +81,14 @@ class DataCollector:
                     self.db.add(fund)
                     result["success"] += 1
                     
-                    # 每100条提交一次
-                    if result["success"] % 100 == 0:
+                    # 每500条提交一次
+                    if result["success"] % 500 == 0:
                         self.db.commit()
                         logger.info(f"已处理 {result['success']} 个基金")
                     
-                    time.sleep(self.request_delay)
+                    # 减少请求间隔以加快采集速度
+                    if result["success"] % 50 == 0:
+                        time.sleep(self.request_delay)
                     
                 except Exception as e:
                     result["failed"] += 1
@@ -103,18 +106,26 @@ class DataCollector:
         
         return result
     
-    def _get_fund_type(self, fund_code: str) -> FundType:
-        """获取基金类型"""
-        try:
-            detail_df = ak.fund_info_a_em(fund=fund_code)
-            if detail_df is not None and not detail_df.empty:
-                type_str = detail_df.iloc[0].get('type', '')
-                for ft in FundType:
-                    if ft.value in str(type_str):
-                        return ft
-        except Exception:
-            pass
-        return FundType.OTHER
+    def _parse_fund_type(self, type_str: str) -> str:
+        """解析基金类型 - 返回字符串"""
+        type_str = str(type_str).lower()
+        if '股票' in type_str:
+            return "股票型"
+        elif '混合' in type_str:
+            return "混合型"
+        elif '债券' in type_str:
+            return "债券型"
+        elif '指数' in type_str:
+            return "指数型"
+        elif '货币' in type_str:
+            return "货币型"
+        elif 'QDII' in type_str:
+            return "QDII"
+        elif 'ETF' in type_str or 'LOF' in type_str:
+            return "ETF"
+        elif 'FOF' in type_str:
+            return "FOF"
+        return "其他"
     
     # ============ 基金净值采集 ============
     
@@ -163,12 +174,116 @@ class DataCollector:
         
         return result
     
+    def collect_fund_nav_batch(self, top_n: int = 5000, days: int = 365) -> Dict[str, Any]:
+        """
+        批量采集基金净值数据 - 高效版本
+        1. 先用 fund_open_fund_daily_em 批量获取所有基金的最新净值
+        2. 然后对前 top_n 只基金采集历史净值
+        
+        Args:
+            top_n: 采集历史净值的基金数量
+            days: 采集的历史天数
+            
+        Returns:
+            dict: 采集结果统计
+        """
+        result = {
+            "latest_nav_records": 0,
+            "history_funds_processed": 0,
+            "history_nav_records": 0,
+            "errors": []
+        }
+        
+        try:
+            # 步骤1: 批量获取所有基金的最新净值
+            logger.info("步骤1: 批量获取所有基金的最新净值...")
+            daily_df = ak.fund_open_fund_daily_em()
+            
+            if daily_df is not None and not daily_df.empty:
+                # 解析列名获取最新日期
+                cols = daily_df.columns.tolist()
+                nav_col = [c for c in cols if '单位净值' in c]
+                accum_nav_col = [c for c in cols if '累计净值' in c]
+                growth_col = [c for c in cols if '增长率' in c]
+                
+                today = datetime.now()
+                
+                for _, row in daily_df.iterrows():
+                    try:
+                        fund_code = str(row.get('基金代码', '')).zfill(6)
+                        if not fund_code:
+                            continue
+                        
+                        nav_date = today
+                        nav = row.get(nav_col[0]) if nav_col else None
+                        if nav is None:
+                            continue
+                        
+                        # 检查是否已存在
+                        existing = self.db.query(FundNav).filter(
+                            FundNav.fund_code == fund_code,
+                            FundNav.nav_date == nav_date
+                        ).first()
+                        
+                        if existing:
+                            continue
+                        
+                        accum_nav = row.get(accum_nav_col[0]) if accum_nav_col else None
+                        daily_growth = row.get(growth_col[0]) if growth_col else None
+                        if daily_growth and isinstance(daily_growth, str):
+                            daily_growth = daily_growth.replace('%', '')
+                        
+                        nav_record = FundNav(
+                            fund_code=fund_code,
+                            nav_date=nav_date,
+                            nav=float(nav),
+                            accumulated_nav=float(accum_nav) if accum_nav else None,
+                            daily_growth=float(daily_growth) if daily_growth else None
+                        )
+                        self.db.add(nav_record)
+                        result["latest_nav_records"] += 1
+                        
+                    except Exception as e:
+                        logger.warning(f"处理净值记录失败: {e}")
+                        continue
+                
+                self.db.commit()
+                logger.info(f"最新净值采集完成: {result['latest_nav_records']} 条记录")
+            
+            # 步骤2: 对前 top_n 只基金采集历史净值
+            logger.info(f"步骤2: 采集前 {top_n} 只基金的历史净值...")
+            funds = self.db.query(Fund).limit(top_n).all()
+            
+            for i, fund in enumerate(funds):
+                try:
+                    nav_count = self._sync_single_fund_nav(fund.fund_code, days)
+                    result["history_nav_records"] += nav_count
+                    result["history_funds_processed"] += 1
+                    
+                    if (i + 1) % 100 == 0:
+                        logger.info(f"已处理 {i+1}/{top_n} 只基金的历史净值")
+                        time.sleep(0.5)
+                    
+                except Exception as e:
+                    result["errors"].append(f"{fund.fund_code}: {str(e)}")
+                    continue
+            
+            self.db.commit()
+            logger.info(f"历史净值采集完成: 处理 {result['history_funds_processed']} 个基金，新增 {result['history_nav_records']} 条记录")
+            
+        except Exception as e:
+            logger.error(f"批量采集净值失败: {e}")
+            result["errors"].append(str(e))
+        
+        return result
+    
     def _sync_single_fund_nav(self, fund_code: str, days: int = 30) -> int:
         """同步单个基金的净值数据"""
         count = 0
         
         try:
-            nav_df = ak.fund_nav_em(fund=fund_code)
+            # 使用 fund_etf_fund_info_em 接口获取基金净值历史
+            nav_df = ak.fund_etf_fund_info_em(fund=fund_code)
             
             if nav_df is None or nav_df.empty:
                 return 0
@@ -257,59 +372,79 @@ class DataCollector:
         
         return result
     
+    def _parse_scale(self, scale_str) -> float:
+        """解析基金规模字符串为数值（单位：亿元）"""
+        if not scale_str or scale_str == '--' or pd.isna(scale_str):
+            return 0.0
+        scale_str = str(scale_str).strip()
+        try:
+            if '亿' in scale_str:
+                return float(scale_str.replace('亿', ''))
+            elif '万' in scale_str:
+                return float(scale_str.replace('万', '')) / 10000
+            elif '千万' in scale_str:
+                return float(scale_str.replace('千万', '')) / 10
+            elif '千万' in scale_str:
+                return float(scale_str.replace('千万', '')) / 10
+            else:
+                return float(scale_str)
+        except:
+            return 0.0
+
     def _update_single_fund_detail(self, fund: Fund) -> None:
         """更新单个基金的详细信息"""
         try:
-            detail_df = ak.fund_info_a_em(fund=fund.fund_code)
+            # 使用 fund_individual_basic_info_xq 接口获取基金详情
+            info_df = ak.fund_individual_basic_info_xq(symbol=fund.fund_code)
             
-            if detail_df is None or detail_df.empty:
+            if info_df is None or info_df.empty:
+                fund.updated_at = datetime.now()
                 return
             
-            row = detail_df.iloc[0]
+            # 转换为字典方便查询
+            info_dict = {}
+            for _, row in info_df.iterrows():
+                item = row.get('item', '')
+                value = row.get('value', '')
+                if item:
+                    info_dict[item] = value
             
-            # 更新字段
-            if pd.notna(row.get('type')):
-                for ft in FundType:
-                    if ft.value in str(row.get('type')):
-                        fund.fund_type = ft
-                        break
+            # 更新基金规模
+            scale_str = info_dict.get('最新规模', '0')
+            fund.scale = self._parse_scale(scale_str)
             
-            if pd.notna(row.get('found_date')):
-                date_str = str(row.get('found_date'))
-                try:
-                    fund.establishment_date = datetime.strptime(date_str, '%Y-%m-%d')
-                except:
-                    pass
+            # 更新基金公司
+            if '基金公司' in info_dict:
+                fund.manager = info_dict['基金公司']
             
-            if pd.notna(row.get('manager')):
-                fund.manager = str(row.get('manager'))
+            # 更新基金经理
+            if '基金经理' in info_dict:
+                fund.fund_manager = info_dict['基金经理']
             
-            if pd.notna(row.get('fund_manager')):
-                fund.fund_manager = str(row.get('fund_manager'))
+            # 更新托管银行
+            if '托管银行' in info_dict:
+                fund.custodian = info_dict['托管银行']
             
-            if pd.notna(row.get('custodian')):
-                fund.custodian = str(row.get('custodian'))
+            # 更新成立日期
+            if '成立时间' in info_dict:
+                est_date = info_dict['成立时间']
+                if est_date and est_date != '--':
+                    try:
+                        fund.establishment_date = pd.to_datetime(est_date)
+                    except:
+                        pass
             
-            # 费率
-            if pd.notna(row.get('management_fee')):
-                fund.management_fee = float(row.get('management_fee'))
-            if pd.notna(row.get('custodian_fee')):
-                fund.custodian_fee = float(row.get('custodian_fee'))
-            if pd.notna(row.get('sales_service_fee')):
-                fund.sales_service_fee = float(row.get('sales_service_fee'))
-            
-            # 规模
-            if pd.notna(row.get('scale')):
-                fund.scale = float(row.get('scale'))
-            
-            # 风险等级
-            if pd.notna(row.get('risk_level')):
-                fund.risk_level = str(row.get('risk_level'))
+            # 更新基金类型
+            if '基金类型' in info_dict:
+                fund_type = info_dict['基金类型']
+                if fund_type and fund_type != '--':
+                    fund.fund_type = self._parse_fund_type(fund_type)
             
             fund.updated_at = datetime.now()
             
         except Exception as e:
-            logger.warning(f"更新基金详情失败: {e}")
+            logger.warning(f"更新基金 {fund.fund_code} 详情失败: {e}")
+            fund.updated_at = datetime.now()
     
     # ============ 基金持仓采集 ============
     
@@ -444,8 +579,8 @@ class DataCollector:
                     FundNav.fund_code == fund.fund_code
                 ).order_by(FundNav.nav_date.desc()).first()
                 
-                # 获取最近2天的净值数据
-                nav_df = ak.fund_nav_em(fund=fund.fund_code)
+                # 获取最近2天的净值数据 - 使用 fund_etf_fund_info_em
+                nav_df = ak.fund_etf_fund_info_em(fund=fund.fund_code)
                 
                 if nav_df is None or nav_df.empty:
                     result["skipped"] += 1
