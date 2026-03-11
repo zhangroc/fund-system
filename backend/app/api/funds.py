@@ -1,11 +1,14 @@
 """基金 API 路由"""
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
 
 from app.core.database import get_db
 from app.models.fund import FundType
+from app.services.fund_service import FundService, AkShareSync
+from app.services.cache_service import cache, cache_key, CACHE_KEYS, CACHE_EXPIRE
 from app.schemas.fund import (
     FundCreate, FundUpdate, FundResponse, 
     FundFilter, FundFilterRequest, FundFilterResponse,
@@ -166,18 +169,102 @@ async def get_fund_nav(
     days: int = Query(30, ge=1, le=365, description="查询天数"),
     db: Session = Depends(get_db)
 ):
-    """获取基金净值历史"""
+    """获取基金净值历史（带缓存）"""
     fund = FundService.get_fund_by_code(db, fund_code)
     if not fund:
         raise HTTPException(status_code=404, detail="基金不存在")
     
+    # 尝试从缓存获取
+    cache_key_str = f"{CACHE_KEYS['fund_nav']}:{fund_code}:{days}"
+    cached = cache.get(cache_key_str)
+    if cached:
+        return cached
+    
     start_date = datetime.now() - timedelta(days=days)
     nav_history = FundService.get_fund_nav_history(db, fund_code, start_date)
     
-    return {
+    result = {
         "fund_code": fund_code,
         "fund_name": fund.fund_name,
-        "data": nav_history
+        "data": [
+            {
+                "nav_date": nav.nav_date.isoformat() if hasattr(nav.nav_date, 'isoformat') else str(nav.nav_date),
+                "nav": nav.nav,
+                "accumulated_nav": nav.accumulated_nav,
+                "daily_growth": nav.daily_growth
+            }
+            for nav in nav_history
+        ]
+    }
+    
+    # 缓存结果 (30分钟)
+    cache.set(cache_key_str, result, CACHE_EXPIRE["medium"])
+    
+    return result
+
+
+@router.post("/nav/batch")
+async def get_funds_nav_batch(
+    fund_codes: List[str] = Body(..., description="基金代码列表"),
+    days: int = Query(30, ge=1, le=365, description="查询天数"),
+    db: Session = Depends(get_db)
+):
+    """批量获取多只基金净值历史（带缓存）"""
+    if not fund_codes:
+        raise HTTPException(status_code=400, detail="基金代码列表不能为空")
+    
+    if len(fund_codes) > 50:
+        raise HTTPException(status_code=400, detail="单次请求最多支持50只基金")
+    
+    result = {}
+    missing_codes = []
+    
+    # 尝试从缓存批量获取
+    cache_keys = [f"{CACHE_KEYS['fund_nav']}:{code}:{days}" for code in fund_codes]
+    cached_results = cache.get_many(cache_keys)
+    
+    for fund_code in fund_codes:
+        cache_key_str = f"{CACHE_KEYS['fund_nav']}:{fund_code}:{days}"
+        
+        # 检查缓存
+        if cache_key_str in cached_results:
+            result[fund_code] = cached_results[cache_key_str]
+        else:
+            missing_codes.append(fund_code)
+    
+    # 对未缓存的基金查询数据库
+    if missing_codes:
+        start_date = datetime.now() - timedelta(days=days)
+        
+        for fund_code in missing_codes:
+            fund = FundService.get_fund_by_code(db, fund_code)
+            if not fund:
+                result[fund_code] = {"error": f"基金 {fund_code} 不存在"}
+                continue
+            
+            nav_history = FundService.get_fund_nav_history(db, fund_code, start_date)
+            nav_data = {
+                "fund_code": fund_code,
+                "fund_name": fund.fund_name,
+                "data": [
+                    {
+                        "nav_date": nav.nav_date.isoformat() if hasattr(nav.nav_date, 'isoformat') else str(nav.nav_date),
+                        "nav": nav.nav,
+                        "accumulated_nav": nav.accumulated_nav,
+                        "daily_growth": nav.daily_growth
+                    }
+                    for nav in nav_history
+                ]
+            }
+            result[fund_code] = nav_data
+            
+            # 缓存单个基金数据
+            cache.set(cache_key_str, nav_data, CACHE_EXPIRE["medium"])
+    
+    return {
+        "total": len(fund_codes),
+        "days": days,
+        "data": result
     }
 
 

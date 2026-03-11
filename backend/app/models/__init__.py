@@ -2,9 +2,11 @@
 from app.models.fund import Fund, FundNav, FundHolding, FundType
 from app.models.backtest import Strategy, Backtest, BacktestTrade, StrategyType, BacktestStatus
 from app.models.portfolio import Portfolio
+from app.models.benchmark import Benchmark, BenchmarkNav
 
 __all__ = [
     "Fund", "FundNav", "FundHolding", "FundType",
     "Strategy", "Backtest", "BacktestTrade", "StrategyType", "BacktestStatus",
-    "Portfolio"
+    "Portfolio",
+    "Benchmark", "BenchmarkNav"
 ]

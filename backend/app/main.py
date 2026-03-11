@@ -11,6 +11,7 @@ from app.api.strategies import router as strategies_router
 from app.api.backtests import router as backtests_router
 from app.api.portfolios import router as portfolios_router
 from app.api.data_collection import router as data_collection_router
+from app.api.benchmarks import router as benchmarks_router
 
 # 配置日志
 logging.basicConfig(
@@ -62,6 +63,7 @@ app.include_router(strategies_router)
 app.include_router(backtests_router)
 app.include_router(portfolios_router)
 app.include_router(data_collection_router)
+app.include_router(benchmarks_router)
 
 
 @app.get("/")
