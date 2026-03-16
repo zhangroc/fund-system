@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
 import numpy as np
+import pandas as pd
 
 from app.models.benchmark import Benchmark, BenchmarkNav, DEFAULT_BENCHMARKS
 
@@ -74,24 +75,24 @@ class BenchmarkService:
         limit: int = 365
     ) -> List[BenchmarkNav]:
         """获取基准指数历史数据"""
-        query = db.query(BenchmarkNav).filter(BenchmarkNav.code == code)
+        query = db.query(BenchmarkNav).filter(BenchmarkNav.benchmark_code == code)
         
         if start_date:
-            query = query.filter(BenchmarkNav.nav_date >= start_date)
+            query = query.filter(BenchmarkNav.trade_date >= start_date)
         if end_date:
-            query = query.filter(BenchmarkNav.nav_date <= end_date)
+            query = query.filter(BenchmarkNav.trade_date <= end_date)
         
-        return query.order_by(BenchmarkNav.nav_date.asc()).limit(limit).all()
+        return query.order_by(BenchmarkNav.trade_date.asc()).limit(limit).all()
     
     @staticmethod
-    def add_benchmark_nav(db: Session, code: str, nav_date: datetime, 
-                          nav: float, daily_return: float = None) -> BenchmarkNav:
+    def add_benchmark_nav(db: Session, code: str, trade_date: datetime, 
+                          close: float, pct_chg: float = None) -> BenchmarkNav:
         """添加基准指数净值"""
         nav_record = BenchmarkNav(
-            code=code,
-            nav_date=nav_date,
-            nav=nav,
-            daily_return=daily_return
+            benchmark_code=code,
+            trade_date=trade_date,
+            close=close,
+            pct_chg=pct_chg
         )
         db.add(nav_record)
         db.commit()
@@ -102,8 +103,8 @@ class BenchmarkService:
     def get_latest_nav(db: Session, code: str) -> Optional[BenchmarkNav]:
         """获取最新净值"""
         return db.query(BenchmarkNav).filter(
-            BenchmarkNav.code == code
-        ).order_by(BenchmarkNav.nav_date.desc()).first()
+            BenchmarkNav.benchmark_code == code
+        ).order_by(BenchmarkNav.trade_date.desc()).first()
 
 
 class AlphaBetaCalculator:
@@ -292,8 +293,8 @@ class BenchmarkSync:
                     if close:
                         # 计算日收益率
                         existing = db.query(BenchmarkNav).filter(
-                            BenchmarkNav.code == code,
-                            BenchmarkNav.nav_date == date
+                            BenchmarkNav.benchmark_code == code,
+                            BenchmarkNav.trade_date == date
                         ).first()
                         
                         if not existing:
@@ -301,13 +302,13 @@ class BenchmarkSync:
                             prev_nav = BenchmarkService.get_latest_nav(db, code)
                             daily_return = None
                             if prev_nav:
-                                daily_return = ((close - prev_nav.nav) / prev_nav.nav) * 100
+                                daily_return = ((close - prev_nav.close) / prev_nav.close) * 100
                             
                             nav_record = BenchmarkNav(
-                                code=code,
-                                nav_date=date,
-                                nav=float(close),
-                                daily_return=daily_return
+                                benchmark_code=code,
+                                trade_date=date,
+                                close=float(close),
+                                pct_chg=daily_return
                             )
                             db.add(nav_record)
                             synced_count += 1
@@ -327,6 +328,3 @@ class BenchmarkSync:
             db.rollback()
             return 0
 
-
-# 辅助导入 pandas
-import pandas as pd
